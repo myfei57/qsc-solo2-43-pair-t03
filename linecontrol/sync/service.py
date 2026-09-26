@@ -48,10 +48,11 @@ class SyncService:
             raise OutOfRange("baseline lifetime must be positive", ttl=ttl)
         record = self._log.append(
             KIND_SYNC_BASELINE,
-            generation=0,
+            generation=self.generation(),
             payload={
                 "phase_deg": angle,
                 "freq_hz": round(float(freq_hz), 6),
+                "ttl_ticks": ttl,
             },
             tick=self._clock.tick,
         )
@@ -65,7 +66,23 @@ class SyncService:
         return Baseline.from_record(records[-1])
 
     def require_baseline(self) -> Baseline:
-        return self.baseline()
+        baseline = self.baseline()
+        if baseline.is_expired(self._clock.tick):
+            raise BaselineExpired(
+                "calibration baseline has exceeded its lifetime",
+                baseline=baseline.baseline_id,
+                expires_tick=baseline.expires_tick,
+                now=self._clock.tick,
+            )
+        generation = self.generation()
+        if baseline.is_stale(generation):
+            raise BaselineStale(
+                "calibration baseline belongs to an earlier parameter generation",
+                baseline=baseline.baseline_id,
+                expected=baseline.generation,
+                observed=generation,
+            )
+        return baseline
 
     def verify_frequency(
         self, measured_hz: float, baseline: Optional[Baseline] = None
@@ -192,9 +209,17 @@ class SyncService:
         try:
             baseline = self.baseline()
         except BaselineMissing:
-            return {"baseline": None, "generation": self.generation()}
+            return {
+                "baseline": None,
+                "generation": self.generation(),
+                "stale": False,
+                "expired": False,
+            }
+        generation = self.generation()
         return {
             "baseline": baseline.describe(),
-            "generation": self.generation(),
+            "generation": generation,
             "batches": self.batches().size(),
+            "stale": baseline.is_stale(generation),
+            "expired": baseline.is_expired(self._clock.tick),
         }
